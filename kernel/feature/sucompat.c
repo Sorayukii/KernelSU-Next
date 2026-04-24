@@ -26,12 +26,37 @@ static char __user *ksud_user_path(void)
 	return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
 }
 
+#if !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE) && defined(KSU_CAN_USE_JUMP_LABEL)
+DEFINE_STATIC_KEY_TRUE(ksud_sucompat_key);
+static inline void ksu_sucompat_enable_branch()
+{
+	pr_info("su_compat: enable sucompat branches\n");
+	static_branch_enable(&ksud_sucompat_key);
+	smp_mb();
+}
+static inline void ksu_sucompat_disable_branch()
+{
+	pr_info("su_compat: remove sucompat branches\n");
+	static_branch_disable(&ksud_sucompat_key);
+	smp_mb();
+}
+#else
+static inline void ksu_sucompat_enable_branch() { } // no-op
+static inline void ksu_sucompat_disable_branch() { } // no-op
+#endif
+
 __attribute__((hot))
 static __always_inline bool is_su_allowed(const void **ptr_to_check)
 {
 #ifndef CONFIG_KSU_TAMPER_SYSCALL_TABLE
+#ifdef KSU_CAN_USE_JUMP_LABEL
+	// read as: if not 'likely' disabled
+	if (!!!static_branch_likely(&ksud_sucompat_key))
+		return false;
+#else
 	if (!ksu_su_compat_enabled)
 		return false;
+#endif // KSU_CAN_USE_JUMP_LABEL
 #endif
 
 	if (likely(test_thread_flag(TIF_SECCOMP)))
@@ -101,14 +126,14 @@ static __always_inline void ksu_sucompat_user_common(const char __user **filenam
 	if (get_user(buf, &fn_p[1]))
 		return;
 
-	if (likely((buf & 0x00FFFFFFFFFFFFFFU) != (su_p[1] & 0x00FFFFFFFFFFFFFFU)))
+	if (likely((buf & 0x00FFFFFFFFFFFFFFUL) != (su_p[1] & 0x00FFFFFFFFFFFFFFUL)))
 		return;
 
 #else
 	if (get_user(buf, &fn_p[3]))
 		return;
 
-	if (likely((buf & 0x00FFFFFFU) != (su_p[3] & 0x00FFFFFFU)))
+	if (likely((buf & 0x00FFFFFFUL) != (su_p[3] & 0x00FFFFFFUL)))
 		return;
 
 	if (unlikely(get_user(buf, &fn_p[2])))
@@ -197,10 +222,10 @@ static __always_inline void ksu_sucompat_kernel_common(void **filename_ptr, void
 
 	// getname_flags pads this so nothing to worry about, dereference with confidence!
 #ifdef CONFIG_64BIT
-	if (likely((fn_p[1] & 0x00FFFFFFFFFFFFFFU) != (su_p[1] & 0x00FFFFFFFFFFFFFFU)))
+	if (likely((fn_p[1] & 0x00FFFFFFFFFFFFFFUL) != (su_p[1] & 0x00FFFFFFFFFFFFFFUL)))
 		return;
 #else
-	if (likely((fn_p[3] & 0x00FFFFFFU) != (su_p[3] & 0x00FFFFFFU)))
+	if (likely((fn_p[3] & 0x00FFFFFFUL) != (su_p[3] & 0x00FFFFFFUL)))
 		return;
 
 	if (fn_p[2] != su_p[2])
@@ -263,6 +288,7 @@ static inline void syscall_table_sucompat_disable() { } // no-op
 static void ksu_sucompat_enable()
 {
 
+	ksu_sucompat_enable_branch();
 	syscall_table_sucompat_enable();
 
 	ksu_su_compat_enabled = true;
@@ -272,6 +298,7 @@ static void ksu_sucompat_enable()
 static void ksu_sucompat_disable()
 {
 
+	ksu_sucompat_disable_branch();
 	syscall_table_sucompat_disable();
 
 	ksu_su_compat_enabled = false;
